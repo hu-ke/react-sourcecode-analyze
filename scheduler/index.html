@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+<style>
+    .ball{
+        position: absolute;
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        background-color: red;
+        top: 0;
+        animation: jump 1s ease-in-out infinite alternate;
+    }
+    @keyframes jump{
+        from{
+            top: 0;
+        }
+        to{
+            top: 400px;
+        }
+    }
+</style>
+    <div class="ball"></div>
+    <button style="margin-left: 200px;" id="taskBtn">开始搬盒子啦</button>
+    <button style="margin-left: 20px;" id="taskBtnScheduler">开始搬盒子啦（交给scheduler）</button>
+    <script>
+const IMMEDIATE_PRIORITY_TIMEOUT = -1; // Eventually times out
+const USER_BLOCKING_PRIORITY_TIMEOUT = 250;
+const NORMAL_PRIORITY_TIMEOUT = 5000;
+const LOW_PRIORITY_TIMEOUT = 10000; // Never times out
+const frameInterval = 5
+let isMessageLoopRunning = false
+let isHostCallbackScheduled = false;
+let isPerformingWork = false
+let scheduledHostCallback = null; // 被安排的任务
+// scheduler
+let taskQueue = []
+let taskIdCounter = 1
+
+function shouldYieldToHost() {
+    let timeElapsed = getCurrentTime() - startTime;
+    if (timeElapsed < frameInterval) {
+        return false;
+    }
+    return true;
+}
+
+// 利用messageChannle宏任务
+let channel = new MessageChannel()
+let port = channel.port2
+channel.port1.onmessage = performWorkUntilDeadline
+
+function performWorkUntilDeadline() {
+    if (scheduledHostCallback !== null) {
+        let currentTime = getCurrentTime()
+        startTime = currentTime
+        let hasTimeRemaining = true
+        let hasMoreWork = true
+        try {
+            hasMoreWork = scheduledHostCallback(hasTimeRemaining, currentTime)
+        } finally {
+            if (hasMoreWork) {
+                schedulePerformWorkUntilDeadline();
+            } else {
+                isMessageLoopRunning = false
+                scheduledHostCallback = null
+            }
+        }
+    } else {
+        isMessageLoopRunning = false
+    }
+}
+
+function getCurrentTime() {
+    return performance.now();
+}
+
+function workLoop(hasTimeRemaining, initialTime) {
+    let currentTime = initialTime;
+    currentTask = taskQueue[0]
+    while(currentTask) {
+        if (currentTask.expirationTime > currentTime && (!hasTimeRemaining || shouldYieldToHost())) {
+            break;
+        }
+        var callback = currentTask.callback;
+        if (typeof callback === 'function') {
+            currentTask.callback = null;
+            var didUserCallbackTimeout = currentTask.expirationTime <= currentTime;
+
+            var continuationCallback = callback(didUserCallbackTimeout);
+            currentTime = getCurrentTime();
+
+            if (typeof continuationCallback === 'function') {
+                currentTask.callback = continuationCallback;
+            } else {
+                if (currentTask === taskQueue[0]) {
+                    // console.log('pop')
+                    taskQueue.shift()
+                }
+            }
+        } else {
+            taskQueue.shift()
+        }
+        currentTask = taskQueue[0]
+        // console.log('currentTask>>', currentTask)
+    }
+    if (currentTask) {
+        return true;
+    }
+    return false
+}
+
+function flushWork(hasTimeRemaining, initialTime) {
+    isPerformingWork = true
+    isHostCallbackScheduled = false
+    try {
+        return workLoop(hasTimeRemaining, initialTime);
+    } finally {
+        currentTask = null;
+        isPerformingWork = false;
+    }
+}
+
+// 新建task放入taskQueue里，设置好scheduledHostCallback（flushWork），并触发postMessage
+function unstable_scheduleCallback(callback) {
+    let startTime = currentTime = getCurrentTime()
+    let newTask = {
+        id: taskIdCounter++,
+        callback,
+        startTime,
+        expirationTime: startTime + LOW_PRIORITY_TIMEOUT
+        // expirationTime: startTime + USER_BLOCKING_PRIORITY_TIMEOUT
+    }
+    taskQueue.push(newTask)
+    if (!isHostCallbackScheduled && !isPerformingWork) {
+        isHostCallbackScheduled = true;
+        requestHostCallback(flushWork);
+    }
+    return newTask;
+}
+function requestHostCallback(callback) {
+    scheduledHostCallback = callback
+    if (!isMessageLoopRunning) {
+        isMessageLoopRunning = true;
+        schedulePerformWorkUntilDeadline();
+    }
+}
+function schedulePerformWorkUntilDeadline() {
+    port.postMessage(null);
+}
+
+// 业务
+let storehouse = {
+    boxes: 100000
+}
+let storehouseProxy = new Proxy(storehouse, {
+    set(target, prop, value, receiver) {
+        target[prop] = value;
+        if (prop === 'boxes' && target['boxes'] === 0) {
+            console.log('盒子搬完啦，任务完成~', getCurrentTime())
+            target['boxes'] = 100000
+        }
+        return true
+    }
+})
+let execSingleTask = () => {
+    for (let i = 0; i < 10000; i++) { // 故意增加单个task的时间
+    }
+    storehouseProxy.boxes--
+}
+
+let myTaskList = (new Array(storehouse.boxes)).fill(execSingleTask)
+
+
+document.getElementById('taskBtn').addEventListener('click', () => {
+    console.log('开始执行任务：', getCurrentTime())
+    myTaskList.forEach(taskFn => {
+        taskFn()
+    })
+})
+
+document.getElementById('taskBtnScheduler').addEventListener('click', () => {
+    console.log('开始执行任务（scheduler）：', getCurrentTime())
+    myTaskList.forEach((taskFn, i) => {
+        unstable_scheduleCallback(taskFn)
+    })
+})
+        
+    </script>
+</body>
+</html>
